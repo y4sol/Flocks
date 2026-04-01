@@ -1,4 +1,4 @@
-﻿param(
+param(
     [switch]$InstallTui,
     [switch]$Help
 )
@@ -387,18 +387,7 @@ function Get-FlocksProcessIds {
     }
 
     $escapedToolDir = if ([string]::IsNullOrWhiteSpace($toolDir)) { "" } else { [Regex]::Escape($toolDir) }
-    $patterns = @(
-        "flocks\.server\.app",
-        "uv tool install .*flocks",
-        "uv tool .*flocks",
-        "uv sync",
-        "npm(\.cmd)? run preview",
-        "vite preview",
-        "agentflocks[/\\]flocks"
-    )
-    if ($escapedToolDir) {
-        $patterns += $escapedToolDir
-    }
+    $escapedProjectRoot = if ([string]::IsNullOrWhiteSpace($ProjectRoot)) { "" } else { [Regex]::Escape($ProjectRoot) }
 
     try {
         $processes = Get-CimInstance Win32_Process -ErrorAction Stop
@@ -415,11 +404,17 @@ function Get-FlocksProcessIds {
         if ([string]::IsNullOrWhiteSpace($commandLine)) {
             continue
         }
-        foreach ($pattern in $patterns) {
-            if ($commandLine -match $pattern) {
-                $matches.Add([int]$process.ProcessId)
-                break
-            }
+
+        $isMatch = $commandLine -match "flocks\.server\.app"
+        if (-not $isMatch -and $escapedProjectRoot) {
+            $isMatch = $commandLine -match $escapedProjectRoot -and $commandLine -match "(uv tool|uv sync|npm(\.cmd)? run preview|vite preview)"
+        }
+        if (-not $isMatch -and $escapedToolDir) {
+            $isMatch = $commandLine -match $escapedToolDir -and $commandLine -match "flocks"
+        }
+
+        if ($isMatch) {
+            $matches.Add([int]$process.ProcessId)
         }
     }
 
@@ -427,8 +422,6 @@ function Get-FlocksProcessIds {
 }
 
 function Stop-FlocksProcesses {
-    param([switch]$Aggressive)
-
     Write-Info "检查并停止可能锁定安装目录的 Flocks 相关进程..."
 
     $flocksCommand = Get-Command flocks -ErrorAction SilentlyContinue
@@ -450,14 +443,6 @@ function Stop-FlocksProcesses {
 
     foreach ($processId in Get-FlocksProcessIds -ProjectRoot $RootDir) {
         Stop-TrackedProcess -ProcessId $processId -Reason "Flocks related process"
-    }
-
-    if ($Aggressive) {
-        foreach ($name in @("flocks", "uvicorn", "esbuild")) {
-            Get-Process -Name $name -ErrorAction SilentlyContinue | ForEach-Object {
-                Stop-TrackedProcess -ProcessId $_.Id -Reason ("process name {0}" -f $name)
-            }
-        }
     }
 
     Start-Sleep -Seconds 1
@@ -495,7 +480,7 @@ function Invoke-InstallerCommandWithLockRetry {
     }
 
     Write-Info "$Description 检测到文件锁定，尝试清理残留进程后重试..."
-    Stop-FlocksProcesses -Aggressive
+    Stop-FlocksProcesses
     Start-Sleep -Seconds 3
 
     $retryOutput = @(& $ScriptBlock 2>&1)
@@ -514,7 +499,6 @@ function Install-FlocksCli {
 
     Push-Location $RootDir
     try {
-        Stop-FlocksProcesses
         Invoke-InstallerCommandWithLockRetry -Description "flocks 全局 CLI 安装" -ScriptBlock {
             & uv tool install --editable $RootDir --force
         }
@@ -731,7 +715,6 @@ function Main {
     Write-Info "使用 uv sync --group dev 安装 Python 后端依赖（含测试与 lint）..."
     Push-Location $RootDir
     try {
-        Stop-FlocksProcesses
         Invoke-InstallerCommandWithLockRetry -Description "Python 后端依赖安装" -ScriptBlock {
             & uv sync --group dev
         }

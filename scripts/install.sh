@@ -441,6 +441,72 @@ is_lock_error_output() {
   [[ "$output" =~ 拒绝访问|Access\ is\ denied|os\ error\ 5|WinError\ 5|failed\ to\ remove\ directory|Failed\ to\ update\ Windows\ PE\ resources ]]
 }
 
+get_runtime_pid_file_paths() {
+  local flocks_root="${FLOCKS_ROOT:-$HOME/.flocks}"
+  local run_dir="$flocks_root/run"
+  printf '%s\n' \
+    "$run_dir/backend.pid" \
+    "$run_dir/webui.pid" \
+    "$run_dir/upgrade_server.pid"
+}
+
+get_pid_from_runtime_file() {
+  local pid_file="$1" raw
+  [[ -n "$pid_file" && -f "$pid_file" ]] || return 1
+  raw="$(<"$pid_file")" || return 1
+
+  if [[ "$raw" =~ ^[[:space:]]*([0-9]+)[[:space:]]*$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+
+  if [[ "$raw" =~ \"pid\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+
+  return 1
+}
+
+stop_tracked_process() {
+  local process_id="$1"
+  local reason="${2:-tracked process}"
+  [[ -n "$process_id" && "$process_id" =~ ^[0-9]+$ && "$process_id" -gt 0 ]] || return 0
+
+  kill "$process_id" >/dev/null 2>&1 || kill -9 "$process_id" >/dev/null 2>&1 || true
+  info "已停止 ${reason} (PID: ${process_id})"
+}
+
+list_flocks_process_ids() {
+  local tool_dir=""
+  if has_cmd uv; then
+    tool_dir="$(uv tool dir 2>/dev/null | tr -d '\r' || true)"
+  fi
+
+  ps -ax -o pid= -o command= | while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    local pid="${line%% *}"
+    local command="${line#"$pid"}"
+    command="${command#"${command%%[![:space:]]*}"}"
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    [[ "$pid" != "$$" ]] || continue
+
+    case "$command" in
+      *flocks.server.app*|*uvicorn*flocks.server.app*)
+        printf '%s\n' "$pid"
+        ;;
+      *"$ROOT_DIR"*uv\ tool*|*"$ROOT_DIR"*preview*)
+        printf '%s\n' "$pid"
+        ;;
+      *)
+        if [[ -n "$tool_dir" && "$command" == *"$tool_dir"*flocks* ]]; then
+          printf '%s\n' "$pid"
+        fi
+        ;;
+    esac
+  done
+}
+
 stop_flocks_processes() {
   info "检查并停止可能锁定安装目录的 Flocks 相关进程..."
 
@@ -449,12 +515,17 @@ stop_flocks_processes() {
     sleep 2
   fi
 
-  pkill -f "flocks.server.app" >/dev/null 2>&1 || true
-  pkill -f "uvicorn.*flocks.server.app" >/dev/null 2>&1 || true
-  pkill -f "uv tool install.*flocks" >/dev/null 2>&1 || true
-  pkill -f "uv sync" >/dev/null 2>&1 || true
-  pkill -f "npm run preview" >/dev/null 2>&1 || true
-  pkill -f "vite preview" >/dev/null 2>&1 || true
+  local pid_file pid
+  while IFS= read -r pid_file; do
+    pid="$(get_pid_from_runtime_file "$pid_file" || true)"
+    [[ -n "$pid" ]] || continue
+    stop_tracked_process "$pid" "runtime process from $pid_file"
+  done < <(get_runtime_pid_file_paths)
+
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    stop_tracked_process "$pid" "Flocks related process"
+  done < <(list_flocks_process_ids | awk '!seen[$0]++')
 
   sleep 1
 }
@@ -491,7 +562,6 @@ install_flocks_cli() {
   info "安装 flocks 全局 CLI..."
   (
     cd "$ROOT_DIR"
-    stop_flocks_processes
     run_with_lock_retry "flocks 全局 CLI 安装" uv tool install --editable "$ROOT_DIR" --force
   )
 
@@ -664,7 +734,6 @@ main() {
   info "使用 uv sync --group dev 安装 Python 后端依赖（含测试与 lint）..."
   (
     cd "$ROOT_DIR"
-    stop_flocks_processes
     run_with_lock_retry "Python 后端依赖安装" uv sync --group dev
   )
 

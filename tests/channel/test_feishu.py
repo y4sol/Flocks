@@ -598,6 +598,78 @@ def test_build_ws_client_ignores_normal_close_during_stop(monkeypatch) -> None:
     assert ws_client.start_error is None
 
 
+def test_build_ws_client_ignores_conn_cleared_during_stop(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeConnection:
+        def __init__(self, client) -> None:
+            self._client = client
+
+        async def recv(self):
+            while not self._client.closed:
+                await asyncio.sleep(0.01)
+            return b"ignored"
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            captured["client"] = self
+            self._conn = None
+            self._auto_reconnect = kwargs["auto_reconnect"]
+            self.closed = False
+            self.disconnect_calls = 0
+
+        def start(self):
+            loop = asyncio.get_event_loop()
+            self._conn = _FakeConnection(self)
+            loop.create_task(self._receive_message_loop())
+            loop.run_forever()
+
+        async def _handle_message(self, _msg):
+            return None
+
+        async def _disconnect(self):
+            self.disconnect_calls += 1
+            self.closed = True
+            self._conn = None
+
+    fake_lark = types.ModuleType("lark_oapi")
+    fake_lark.LogLevel = types.SimpleNamespace(WARNING="warning")
+    fake_ws_client = types.ModuleType("lark_oapi.ws.client")
+    fake_ws_client.Client = _FakeClient
+    fake_ws_client.loop = None
+
+    real_import_module = __import__("importlib").import_module
+
+    def fake_import_module(name, package=None):
+        if name == "lark_oapi":
+            return fake_lark
+        if name == "lark_oapi.ws.client":
+            return fake_ws_client
+        if name == "lark_oapi.adapter.websocket":
+            raise ImportError("legacy websocket adapter missing")
+        return real_import_module(name, package)
+
+    monkeypatch.setattr(
+        "flocks.channel.builtin.feishu.monitor.importlib.import_module",
+        fake_import_module,
+    )
+
+    ws_client = _build_ws_client(
+        app_id="app-id",
+        app_secret="app-secret",
+        event_handler=lambda _data: None,
+        domain="https://open.feishu.cn",
+    )
+
+    ws_client.start()
+    ws_client.stop()
+
+    fake_client = captured["client"]
+    assert fake_client.disconnect_calls >= 1
+    assert ws_client.start_error is None
+
+
 @pytest.mark.asyncio
 async def test_parse_reaction_event_falls_back_to_user_id(monkeypatch) -> None:
     from flocks.channel.builtin.feishu.monitor import _parse_reaction_event
