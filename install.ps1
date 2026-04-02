@@ -62,6 +62,36 @@ function New-TemporaryDirectory {
     return $path
 }
 
+function Unblock-InstallFiles {
+    param([string]$TargetDir)
+
+    if ([string]::IsNullOrWhiteSpace($TargetDir) -or -not (Test-Path $TargetDir)) {
+        return
+    }
+
+    try {
+        Get-ChildItem -Path $TargetDir -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue
+    }
+    catch {
+    }
+}
+
+function Invoke-WorkspaceInstaller {
+    param(
+        [string]$InstallerPath,
+        [string[]]$InstallerArgs = @()
+    )
+
+    if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
+        Fail "安装脚本路径为空。"
+    }
+
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $InstallerPath @InstallerArgs
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+
 function Get-ArchiveCandidateUrls {
     $baseUrl = "https://github.com/$RepoSlug/archive/refs"
 
@@ -140,6 +170,7 @@ function Main {
             Remove-Item -Path $InstallDir -Recurse -Force
         }
         Copy-Item -Path $projectRoot -Destination $InstallDir -Recurse -Force
+        Unblock-InstallFiles -TargetDir $InstallDir
 
         $installerPath = Join-Path $InstallDir "scripts\install.ps1"
         Write-Info "下载来源: $downloadUrl"
@@ -151,7 +182,7 @@ function Main {
             $installerArgs += "-InstallTui"
         }
 
-        & $installerPath @installerArgs
+        Invoke-WorkspaceInstaller -InstallerPath $installerPath -InstallerArgs $installerArgs
     }
     finally {
         if (-not [string]::IsNullOrWhiteSpace($tempDir) -and (Test-Path $tempDir)) {

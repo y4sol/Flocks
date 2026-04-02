@@ -54,6 +54,16 @@ def test_bootstrap_powershell_installer_uses_utf8_without_bom_with_crlf() -> Non
     assert b"\n" not in data.replace(b"\r\n", b"")
 
 
+def test_bootstrap_powershell_installer_unblocks_files_and_bypasses_execution_policy() -> None:
+    script = (REPO_ROOT / "install.ps1").read_text(encoding="utf-8")
+
+    assert "function Unblock-InstallFiles" in script
+    assert "Unblock-File" in script
+    assert "function Invoke-WorkspaceInstaller" in script
+    assert "& powershell -NoProfile -ExecutionPolicy Bypass -File $InstallerPath @InstallerArgs" in script
+    assert "Invoke-WorkspaceInstaller -InstallerPath $installerPath -InstallerArgs $installerArgs" in script
+
+
 def test_workspace_powershell_installer_uses_utf8_bom_with_crlf() -> None:
     data = (SCRIPT_DIR / "install.ps1").read_bytes()
 
