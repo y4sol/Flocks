@@ -128,6 +128,29 @@ def agent_to_response(
     )
 
 
+def _agent_data_to_info(agent_data: Dict[str, Any]) -> AgentInfoModel:
+    """Build an in-memory AgentInfo from a custom agent's stored data dict.
+
+    Used after create/update to keep ``_custom_agents`` in sync with Storage.
+    """
+    model_data = agent_data.get("model")
+    return AgentInfoModel(
+        name=agent_data["name"],
+        description=agent_data.get("description") or "",
+        description_cn=agent_data.get("description_cn") or agent_data.get("descriptionCn"),
+        prompt=agent_data.get("prompt") or "",
+        temperature=agent_data.get("temperature"),
+        color=agent_data.get("color"),
+        mode=agent_data.get("mode", "primary"),
+        model=AgentModelConfig(
+            model_id=model_data["modelID"],
+            provider_id=model_data["providerID"],
+        ) if model_data else None,
+        native=False,
+        hidden=False,
+    )
+
+
 def _custom_agent_data_to_response(agent_data: Dict[str, Any]) -> AgentResponse:
     """Build an AgentResponse from a custom agent's stored data dict."""
     model_data = agent_data.get("model")
@@ -347,20 +370,9 @@ async def create_agent(req: AgentCreateRequest):
             "tools": req.tools,
         }
         await Storage.write(f"agent/custom/{req.name}", agent_data)
-        # Sync in-memory cache so the new agent is immediately visible via Agent.get/list
-        from flocks.agent.registry import Agent as AgentRegistry, AgentInfo
-        agent_info = AgentInfo(
-            name=req.name,
-            description=req.description or "",
-            description_cn=req.descriptionCn,
-            prompt=req.prompt or "",
-            mode=req.mode or "primary",
-            native=False,
-            hidden=False,
-        )
-        AgentRegistry.register(req.name, agent_info)
-        # Invalidate the state cache so the next list/get picks up the new agent
-        await AgentRegistry.refresh()
+        from flocks.agent.registry import Agent as AgentRegistry
+        AgentRegistry.register(req.name, _agent_data_to_info(agent_data))
+        AgentRegistry.invalidate_cache()
         log.info("agent.created", {"name": req.name})
         return _custom_agent_data_to_response(agent_data)
     except HTTPException:
@@ -405,6 +417,11 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                 agent_data["tools"] = req.tools
 
             await Storage.write(agent_key, agent_data)
+
+            from flocks.agent.registry import Agent as AgentRegistry
+            AgentRegistry.register(name, _agent_data_to_info(agent_data))
+            AgentRegistry.invalidate_cache()
+
             log.info("agent.updated", {"name": name, "source": "storage"})
             return _custom_agent_data_to_response(agent_data)
 
@@ -496,8 +513,9 @@ async def delete_agent(name: str):
             )
 
         # Sync: remove from in-memory agent cache
-        agents = await Agent.state()
-        agents.pop(name, None)
+        from flocks.agent.registry import Agent as AgentRegistry
+        AgentRegistry.unregister(name)
+        AgentRegistry.invalidate_cache()
 
         return {"status": "success", "message": f"Agent {name} deleted"}
     except HTTPException:
@@ -556,6 +574,11 @@ async def update_agent_model(name: str, req: AgentModelUpdateRequest):
             if agent_data is not None:
                 agent_data["model"] = req.model.model_dump() if req.model else None
                 await Storage.write(agent_key, agent_data)
+
+                from flocks.agent.registry import Agent as AgentRegistry
+                AgentRegistry.register(name, _agent_data_to_info(agent_data))
+                AgentRegistry.invalidate_cache()
+
                 log.info("agent.model.updated", {"name": name, "source": "storage"})
                 return _custom_agent_data_to_response(agent_data)
 
