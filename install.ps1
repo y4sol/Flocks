@@ -26,34 +26,6 @@ function Fail {
     exit 1
 }
 
-function Resolve-VersionFromInvocationLine {
-    param([string]$InvocationLine)
-
-    if ([string]::IsNullOrWhiteSpace($InvocationLine)) {
-        return $null
-    }
-
-    $escapedRepoSlug = [Regex]::Escape($RepoSlug)
-    $match = [Regex]::Match(
-        $InvocationLine,
-        "raw\.githubusercontent\.com/$escapedRepoSlug/(?<ref>.+?)/install\.ps1"
-    )
-    if (-not $match.Success) {
-        return $null
-    }
-
-    $ref = $match.Groups["ref"].Value
-    if ([string]::IsNullOrWhiteSpace($ref)) {
-        return $null
-    }
-
-    return $ref
-}
-
-if ([string]::IsNullOrWhiteSpace($Version)) {
-    $Version = Resolve-VersionFromInvocationLine -InvocationLine $MyInvocation.Line
-}
-
 if ([string]::IsNullOrWhiteSpace($Version)) {
     $Version = $DefaultBranch
 }

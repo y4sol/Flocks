@@ -307,9 +307,9 @@ function Get-RuntimePidFilePaths {
 
     $runDir = Join-Path $flocksRoot "run"
     return @(
-        Join-Path $runDir "backend.pid",
-        Join-Path $runDir "webui.pid",
-        Join-Path $runDir "upgrade_server.pid"
+        (Join-Path $runDir "backend.pid")
+        (Join-Path $runDir "webui.pid")
+        (Join-Path $runDir "upgrade_server.pid")
     )
 }
 

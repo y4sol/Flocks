@@ -1,4 +1,9 @@
+import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -44,6 +49,44 @@ def test_powershell_installer_stops_processes_before_retrying_locked_operations(
     assert 'Get-Process -Name $name' not in script
     assert '"uv sync"' not in script
     assert '"vite preview"' not in script
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="pwsh is required to execute PowerShell helper functions")
+def test_powershell_runtime_pid_file_paths_return_three_string_paths() -> None:
+    script = (SCRIPT_DIR / "install.ps1").read_text(encoding="utf-8-sig")
+    script_without_main = re.sub(r"\r?\nMain\s*$", "\n", script)
+    test_script = (
+        script_without_main
+        + """
+
+$env:FLOCKS_ROOT = Join-Path ([System.IO.Path]::GetTempPath()) 'FlocksRoot'
+$paths = @(Get-RuntimePidFilePaths)
+if ($paths.Count -ne 3) {
+    Write-Host "count=$($paths.Count)"
+    exit 1
+}
+if (-not $paths[0].EndsWith([IO.Path]::DirectorySeparatorChar + 'run' + [IO.Path]::DirectorySeparatorChar + 'backend.pid')) {
+    Write-Host "path0=$($paths[0])"
+    exit 1
+}
+if (-not $paths[1].EndsWith([IO.Path]::DirectorySeparatorChar + 'run' + [IO.Path]::DirectorySeparatorChar + 'webui.pid')) {
+    Write-Host "path1=$($paths[1])"
+    exit 1
+}
+if (-not $paths[2].EndsWith([IO.Path]::DirectorySeparatorChar + 'run' + [IO.Path]::DirectorySeparatorChar + 'upgrade_server.pid')) {
+    Write-Host "path2=$($paths[2])"
+    exit 1
+}
+"""
+    )
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-Command", test_script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, output
 
 
 def test_bootstrap_powershell_installer_uses_utf8_without_bom_with_crlf() -> None:
