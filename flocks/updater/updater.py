@@ -1416,6 +1416,7 @@ async def perform_update(
     *,
     zipball_url: str | None = None,
     tarball_url: str | None = None,
+    restart: bool = True,
 ) -> AsyncGenerator[UpdateProgress, None]:
     """
     Async generator that executes the upgrade steps and yields progress events.
@@ -1615,7 +1616,7 @@ async def perform_update(
     _write_version_marker(latest_tag.lstrip("v"))
 
     # ------------------------------------------------------------------ #
-    # Step 7 – restart in-place
+    # Step 7 – restart in-place (skipped when restart=False, e.g. CLI)
     # Send the "restarting" event while the proxy is still alive, then
     # perform the handover (kill frontend + start temp page) right
     # before os.execv so the SSE stream is not broken prematurely.
@@ -1624,6 +1625,14 @@ async def perform_update(
     # CancelledError from client disconnect cannot interrupt between
     # killing the Vite proxy and calling os.execv.
     # ------------------------------------------------------------------ #
+    if not restart:
+        yield UpdateProgress(
+            stage="done",
+            message=f"Upgraded to v{latest_tag}",
+            success=True,
+        )
+        return
+
     yield UpdateProgress(stage="restarting", message="Restarting service...")
 
     log.info("updater.restart", {
