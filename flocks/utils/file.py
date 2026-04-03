@@ -116,7 +116,30 @@ class File:
             from flocks.sandbox.paths import resolve_sandbox_path
             
             project_root = find_project_root()
+            
+            # Default safe system paths (hardcoded)
             safe_system_paths = ["/etc/hosts", "/etc/hostname", "/etc/resolv.conf"]
+            
+            # Load user-configured allow_read_paths from flocks.json
+            try:
+                import json
+                from pathlib import Path
+                config_dir = Path.home() / ".flocks" / "config"
+                for fname in ["flocks.json", "flocks.jsonc"]:
+                    cfg_file = config_dir / fname
+                    if cfg_file.exists():
+                        with open(cfg_file) as f:
+                            raw = f.read()
+                        # Remove comments for jsonc
+                        import re
+                        raw = re.sub(r'//.*$', '', raw, flags=re.MULTILINE)
+                        cfg = json.loads(raw)
+                        user_paths = cfg.get("allowReadPaths", [])
+                        if isinstance(user_paths, list):
+                            safe_system_paths.extend(user_paths)
+                        break
+            except Exception:
+                pass  # Use defaults on any config error
             
             is_allowed = False
             # Check if within project workspace
@@ -129,7 +152,7 @@ class File:
             # Check if in safe system paths whitelist
             if not is_allowed:
                 for safe_path in safe_system_paths:
-                    if abs_path == safe_path or abs_path.startswith(safe_path + "/"):
+                    if abs_path == safe_path or abs_path.startswith(safe_path.rstrip("/") + "/"):
                         is_allowed = True
                         break
             
@@ -137,7 +160,7 @@ class File:
                 raise PermissionError(
                     f"Access denied: file is outside project workspace. "
                     f"Only files under the project directory ({project_root}) "
-                    f"or safe system paths are accessible."
+                    f"or configured allowReadPaths are accessible."
                 )
             
             if not os.path.exists(abs_path):
