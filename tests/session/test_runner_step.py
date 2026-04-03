@@ -2,9 +2,9 @@
 Tests for SessionRunner internals in flocks/session/runner.py
 
 Covers:
-- _agent_allows_tool(): tool permission filtering
+- _agent_declares_tool(): tool declaration filtering
 - _exception_to_error_dict(): exception to error dict conversion
-- _build_tools(): excluded tools filter
+- _build_callable_tool_schema(): excluded tools filter
 - RunnerCallbacks dataclass
 - ToolCall / StepResult dataclasses
 - SessionRunner construction and abort behavior (from existing tests)
@@ -37,10 +37,10 @@ def _make_session(session_id="ses_runner_test"):
     )
 
 
-def _make_agent(name="rex", permission=None):
+def _make_agent(name="rex", tools=None):
     agent = MagicMock()
     agent.name = name
-    agent.permission = permission
+    agent.tools = tools
     return agent
 
 
@@ -115,32 +115,32 @@ class TestRunnerCallbacks:
 
 
 # ---------------------------------------------------------------------------
-# _agent_allows_tool()
+# _agent_declares_tool()
 # ---------------------------------------------------------------------------
 
-class TestAgentAllowsTool:
-    def test_rex_allows_all_tools(self):
+class TestAgentDeclaresTool:
+    def test_agent_with_explicit_tools_allows_declared_tools(self):
         runner = _make_runner()
-        agent = _make_agent(name="rex")
-        assert runner._agent_allows_tool(agent, "bash") is True
-        assert runner._agent_allows_tool(agent, "write_file") is True
-        assert runner._agent_allows_tool(agent, "any_tool") is True
+        agent = _make_agent(name="rex", tools=["bash", "read"])
+        assert runner._agent_declares_tool(agent, "bash") is True
+        assert runner._agent_declares_tool(agent, "read") is True
+        assert runner._agent_declares_tool(agent, "any_tool") is False
 
-    def test_agent_without_permission_allows_all(self):
+    def test_agent_without_tools_defaults_to_deny(self):
         runner = _make_runner()
-        agent = _make_agent(name="plan", permission=None)
-        assert runner._agent_allows_tool(agent, "bash") is True
+        agent = _make_agent(name="plan", tools=None)
+        assert runner._agent_declares_tool(agent, "bash") is False
 
-    def test_agent_with_empty_permission_allows_all(self):
+    def test_agent_with_empty_tools_allows_nothing(self):
         runner = _make_runner()
-        agent = _make_agent(name="explore", permission=[])
-        assert runner._agent_allows_tool(agent, "bash") is True
+        agent = _make_agent(name="explore", tools=[])
+        assert runner._agent_declares_tool(agent, "bash") is False
 
-    def test_non_rex_agent_defaults_to_allow(self):
+    def test_non_rex_agent_defaults_to_deny(self):
         runner = _make_runner()
-        agent = _make_agent(name="custom_agent", permission=None)
-        # Without permission rules, should default to allow
-        assert runner._agent_allows_tool(agent, "read") is True
+        agent = _make_agent(name="custom_agent", tools=None)
+        # Without an explicit tools list, only always-load tools remain available.
+        assert runner._agent_declares_tool(agent, "read") is False
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +214,7 @@ class TestExceptionToErrorDict:
 
 
 # ---------------------------------------------------------------------------
-# _build_tools(): excluded tools filter
+# _build_callable_tool_schema(): excluded tools filter
 # ---------------------------------------------------------------------------
 
 class TestBuildTools:
@@ -242,7 +242,7 @@ class TestBuildTools:
             "flocks.session.runner.ToolRegistry.list_tools",
             return_value=[invalid_tool, bash_tool],
         ):
-            tools = await runner._build_tools(agent)
+            tools = await runner._build_callable_tool_schema(agent)
 
         tool_names = [t["function"]["name"] for t in tools]
         assert "invalid" not in tool_names
@@ -271,7 +271,7 @@ class TestBuildTools:
             "flocks.session.runner.ToolRegistry.list_tools",
             return_value=[noop_tool, real_tool],
         ):
-            tools = await runner._build_tools(agent)
+            tools = await runner._build_callable_tool_schema(agent)
 
         tool_names = [t["function"]["name"] for t in tools]
         assert "_noop" not in tool_names
@@ -293,14 +293,14 @@ class TestBuildTools:
             "flocks.session.runner.ToolRegistry.list_tools",
             return_value=[disabled_tool],
         ):
-            tools = await runner._build_tools(agent)
+            tools = await runner._build_callable_tool_schema(agent)
 
         assert tools == []
 
     @pytest.mark.asyncio
     async def test_tool_format_is_function_type(self):
         runner = _make_runner()
-        agent = _make_agent(name="rex")
+        agent = _make_agent(name="rex", tools=["bash"])
 
         tool_info = ToolInfo(
             name="bash",
@@ -311,10 +311,10 @@ class TestBuildTools:
         )
 
         with patch(
-            "flocks.session.runner.ToolRegistry.list_tools",
-            return_value=[tool_info],
+            "flocks.session.runner.SessionRunner._list_callable_tool_infos_for_turn",
+            AsyncMock(return_value=([tool_info], {"enabledToolCount": 1})),
         ):
-            tools = await runner._build_tools(agent)
+            tools = await runner._build_callable_tool_schema(agent)
 
         assert len(tools) == 1
         assert tools[0]["type"] == "function"
@@ -342,12 +342,12 @@ class TestBuildTools:
         )
 
         selector_mock = AsyncMock(side_effect=[
-            ([tool_v1], {"selectedToolCount": 1}),
-            ([tool_v2], {"selectedToolCount": 1}),
+            ([tool_v1], {"enabledToolCount": 3}),
+            ([tool_v2], {"enabledToolCount": 3}),
         ])
-        with patch.object(SessionRunner, "_select_tool_infos_for_turn", selector_mock):
-            tools1 = await runner._build_tools(agent, [])
-            tools2 = await runner._build_tools(agent, [])
+        with patch.object(SessionRunner, "_list_callable_tool_infos_for_turn", selector_mock):
+            tools1 = await runner._build_callable_tool_schema(agent, [])
+            tools2 = await runner._build_callable_tool_schema(agent, [])
 
         assert [tool["function"]["name"] for tool in tools1] == ["bash"]
         assert [tool["function"]["name"] for tool in tools2] == ["read"]
@@ -369,10 +369,10 @@ class TestBuildTools:
             enabled=True,
         )
 
-        selector_mock = AsyncMock(return_value=([selected_tool], {"selectedToolCount": 1}))
-        with patch.object(SessionRunner, "_select_tool_infos_for_turn", selector_mock):
-            tools1 = await runner1._build_tools(agent, [])
-            tools2 = await runner2._build_tools(agent, [])
+        selector_mock = AsyncMock(return_value=([selected_tool], {"enabledToolCount": 3}))
+        with patch.object(SessionRunner, "_list_callable_tool_infos_for_turn", selector_mock):
+            tools1 = await runner1._build_callable_tool_schema(agent, [])
+            tools2 = await runner2._build_callable_tool_schema(agent, [])
 
         assert tools1 == tools2
         assert selector_mock.await_count == 2
@@ -394,18 +394,18 @@ class TestBuildTools:
 
         with patch.object(
             SessionRunner,
-            "_select_tool_infos_for_turn",
+            "_list_callable_tool_infos_for_turn",
             AsyncMock(return_value=(
                 [selected_tool],
-                {"selectedToolCount": 1, "availableToolCount": 3, "trusted": True},
+                {"enabledToolCount": 3},
             )),
         ):
-            tools = await runner._build_tools(agent, [])
+            tools = await runner._build_callable_tool_schema(agent, [])
 
         assert [tool["function"]["name"] for tool in tools] == ["read"]
         event_callback.assert_awaited_once()
         assert event_callback.await_args.args[0] == "turn.tools_selected"
-        assert event_callback.await_args.args[1]["selectedToolCount"] == 1
+        assert event_callback.await_args.args[1]["enabledToolCount"] == 3
 
     @pytest.mark.asyncio
     async def test_build_tools_rewrites_skill_description(self):
@@ -425,8 +425,8 @@ class TestBuildTools:
 
         with patch.object(
             SessionRunner,
-            "_select_tool_infos_for_turn",
-            AsyncMock(return_value=([skill_tool], {"selectedToolCount": 1})),
+            "_list_callable_tool_infos_for_turn",
+            AsyncMock(return_value=([skill_tool], {"enabledToolCount": 3})),
         ), patch(
             "flocks.tool.system.skill.Skill.all",
             AsyncMock(return_value=[mock_skill]),
@@ -434,7 +434,7 @@ class TestBuildTools:
             "flocks.tool.system.skill.build_description",
             return_value="Dynamic skill description",
         ):
-            tools = await runner._build_tools(agent, [])
+            tools = await runner._build_callable_tool_schema(agent, [])
 
         assert tools[0]["function"]["name"] == "skill"
         assert tools[0]["function"]["description"] == "Dynamic skill description"
@@ -553,20 +553,19 @@ class TestBuildSystemPrompts:
             prompt = runner._build_tool_catalog_prompt(agent)
 
         assert prompt is not None
-        assert "constrained by your current boundaries" in prompt
+        assert "derived from your configured callable tool set" in prompt
         assert "use `tool_search` first" not in prompt
 
     def test_list_catalog_tool_infos_returns_full_catalog_for_rex(self):
         runner = _make_runner()
         agent = _make_agent(name="rex")
         agent.mode = "primary"
-        untrusted_tool = ToolInfo(
+        shell_tool = ToolInfo(
             name="bash",
             description="Run commands",
             category=ToolCategory.CODE,
             native=True,
             enabled=True,
-            requires_trust=True,
         )
         helper_tool = ToolInfo(
             name="read",
@@ -576,23 +575,26 @@ class TestBuildSystemPrompts:
             enabled=True,
         )
 
-        with patch("flocks.session.runner.ToolRegistry.list_tools", return_value=[untrusted_tool, helper_tool]):
+        with patch(
+            "flocks.session.runner.list_tool_catalog_infos",
+            return_value=[shell_tool, helper_tool],
+        ):
             infos = runner._list_catalog_tool_infos(agent)
 
         assert [tool.name for tool in infos] == ["bash", "read"]
 
     def test_list_catalog_tool_infos_filters_subagent_boundaries(self):
         runner = _make_runner()
-        runner.session.metadata = {"trusted": False}
         agent = _make_agent(name="plan")
         agent.mode = "subagent"
+        agent.tools = ["read"]
         tool_infos = [
             ToolInfo(name="bash", description="Run commands", category=ToolCategory.CODE, native=True, enabled=True),
             ToolInfo(name="read", description="Read file contents", category=ToolCategory.FILE, native=True, enabled=True),
             ToolInfo(name="websearch", description="Search web", category=ToolCategory.BROWSER, native=True, enabled=True),
         ]
 
-        with patch("flocks.session.runner.ToolRegistry.list_tools", return_value=tool_infos):
+        with patch("flocks.session.runner.list_tool_catalog_infos", return_value=tool_infos):
             infos = runner._list_catalog_tool_infos(agent)
 
         assert [tool.name for tool in infos] == ["read"]

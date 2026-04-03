@@ -36,12 +36,12 @@ from flocks.session.streaming.stream_events import (
     ReasoningDeltaEvent,
     ReasoningEndEvent,
 )
+from flocks.session.callable_schema import list_session_callable_tool_infos
 from flocks.agent.registry import Agent
 from flocks.agent.agent import AgentInfo
+from flocks.agent.toolset import agent_declares_tool
 from flocks.provider.provider import Provider, ChatMessage
-from flocks.tool.agent_mode_policy import allows_tool
-from flocks.tool.policy import get_tool_policy, is_high_risk
-from flocks.tool.request_selector import RequestToolSelector
+from flocks.tool.catalog import get_tool_catalog_metadata, list_tool_catalog_infos
 from flocks.tool.registry import ToolRegistry, ToolResult
 from flocks.utils.langfuse import generation_scope, trace_scope
 from flocks.session.utils.file_extractor import (
@@ -138,26 +138,18 @@ class SessionRunner:
         self._memory_bootstrap_data: Optional[Dict[str, Any]] = memory_bootstrap_data
         self._static_cache = static_cache if static_cache is not None else {}
 
-    def _is_session_trusted(self) -> bool:
-        metadata = getattr(self.session, "metadata", None) or {}
-        trusted = metadata.get("trusted")
-        if trusted is None:
-            return True
-        return bool(trusted)
-
-    async def _select_tool_infos_for_turn(
+    async def _list_callable_tool_infos_for_turn(
         self,
         agent: AgentInfo,
         messages: List[MessageInfo],
     ) -> Tuple[List[Any], Dict[str, Any]]:
-        selector = RequestToolSelector(
+        result = await list_session_callable_tool_infos(
             session_id=self.session.id,
+            declared_tool_names=getattr(agent, "tools", None),
             step=self._step,
-            trusted=self._is_session_trusted(),
             event_publish_callback=self.callbacks.event_publish_callback,
         )
-        result = await selector.select(agent=agent, messages=messages)
-        return result.selected_tool_infos, result.metadata
+        return result.tool_infos, dict(result.metadata)
 
     async def _publish_turn_tools_event(self, selection_metadata: Dict[str, Any]) -> None:
         if not self.callbacks.event_publish_callback:
@@ -638,7 +630,7 @@ class SessionRunner:
         
         # Build prompts and tools
         system_prompts = await self._build_system_prompts(agent)
-        tools = await self._build_tools(agent, messages)
+        tools = await self._build_callable_tool_schema(agent, messages)
         if self._should_use_text_tool_call_mode() and tools:
             text_tool_catalog = self._build_text_tool_call_catalog_prompt(tools)
             if text_tool_catalog:
@@ -1140,20 +1132,18 @@ Please address this message and continue with your tasks.
 
     def _list_catalog_tool_infos(self, agent: AgentInfo) -> List[Any]:
         tool_infos: List[Any] = []
-        trusted = self._is_session_trusted()
         is_rex = getattr(agent, "name", "") == "rex"
 
-        for tool_info in ToolRegistry.list_tools():
-            if tool_info.name in {"invalid", "_noop"} or not getattr(tool_info, "enabled", True):
-                continue
+        for tool_info in list_tool_catalog_infos():
             if is_rex:
                 tool_infos.append(tool_info)
                 continue
 
-            policy = get_tool_policy(tool_info.name, tool_info)
-            if not allows_tool(agent, tool_info, policy):
+            if not isinstance(getattr(agent, "tools", None), (list, tuple, set)):
+                tool_infos.append(tool_info)
                 continue
-            if policy.requires_trust and not trusted:
+            metadata = get_tool_catalog_metadata(tool_info.name, tool_info)
+            if not agent_declares_tool(agent, tool_info.name) and not metadata.always_load:
                 continue
             tool_infos.append(tool_info)
 
@@ -1186,7 +1176,7 @@ Please address this message and continue with your tasks.
             )
         else:
             rules = (
-                "You can see a tool catalog already constrained by your current boundaries. "
+                "You can see a tool catalog derived from your configured callable tool set. "
                 "This catalog is reference-only and does not define parameter names. "
                 "Only tools exposed in the current callable schema may be called directly. "
                 "Use the current callable schema as the sole source of truth for parameters. "
@@ -1246,13 +1236,13 @@ Please address this message and continue with your tasks.
 
         return "\n".join(lines)
     
-    async def _build_tools(
+    async def _build_callable_tool_schema(
         self,
         agent: AgentInfo,
         messages: Optional[List[MessageInfo]] = None,
     ) -> List[Dict[str, Any]]:
         """Build tool definitions for LLM."""
-        selected_tool_infos, selection_metadata = await self._select_tool_infos_for_turn(agent, messages or [])
+        selected_tool_infos, selection_metadata = await self._list_callable_tool_infos_for_turn(agent, messages or [])
         await self._publish_turn_tools_event(selection_metadata)
 
         tools = []
@@ -1285,19 +1275,18 @@ Please address this message and continue with your tasks.
         log.info("runner.tools_selected", {
             "session_id": self.session.id,
             "step": self._step,
-            "selected": selection_metadata.get("selectedToolCount", len(tools)),
-            "available": selection_metadata.get("availableToolCount"),
-            "trusted": selection_metadata.get("trusted"),
+            "selected": len(tools),
+            "enabled": selection_metadata.get("enabledToolCount"),
         })
         return tools
     
-    def _agent_allows_tool(self, agent: AgentInfo, tool_name: str) -> bool:
-        """Check if agent allows a tool."""
+    def _agent_declares_tool(self, agent: AgentInfo, tool_name: str) -> bool:
+        """Check if agent statically declares a tool."""
         tool = ToolRegistry.get(tool_name)
         if tool is None:
-            return True
-        policy = get_tool_policy(tool_name, tool.info)
-        return allows_tool(agent, tool.info, policy)
+            return False
+        metadata = get_tool_catalog_metadata(tool_name, tool.info)
+        return agent_declares_tool(agent, tool_name) or metadata.always_load
     
     def _exception_to_error_dict(self, exception: Exception) -> Dict[str, Any]:
         """
@@ -2027,24 +2016,15 @@ Please address this message and continue with your tasks.
                 raise PermissionError(f"Permission denied: {request.permission}")
             return
 
-        tool_policy = get_tool_policy(str(getattr(request, "permission", "") or ""))
-        if (
-            self.callbacks.event_publish_callback
-            and tool_policy.permission_key
-        ):
+        tool_metadata = get_tool_catalog_metadata(str(getattr(request, "permission", "") or ""))
+        if self.callbacks.event_publish_callback:
             await self.callbacks.event_publish_callback("runtime.permission_gate", {
                 "sessionID": self.session.id,
                 "step": self._step,
-                "permissionKey": tool_policy.permission_key,
                 "toolName": getattr(request, "permission", ""),
-                "trusted": self._is_session_trusted(),
+                "alwaysLoad": tool_metadata.always_load,
                 "patterns": list(getattr(request, "patterns", None) or []),
             })
-
-        if not self._is_session_trusted() and tool_policy.requires_trust:
-            raise PermissionError(
-                f"Permission denied until workspace is trusted: {request.permission}"
-            )
 
         from flocks.permission.next import PermissionNext
         from flocks.permission.rule import PermissionRule, PermissionLevel
