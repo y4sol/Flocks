@@ -111,14 +111,34 @@ class File:
         try:
             abs_path = os.path.abspath(file_path)
             
-            # Security: restrict file access to project workspace only
+            # Security: restrict file access to project workspace + safe system paths
             from flocks.utils.paths import find_project_root
             from flocks.sandbox.paths import resolve_sandbox_path
+            
             project_root = find_project_root()
+            safe_system_paths = ["/etc/hosts", "/etc/hostname", "/etc/resolv.conf"]
+            
+            is_allowed = False
+            # Check if within project workspace
             try:
                 resolve_sandbox_path(abs_path, str(project_root), str(project_root))
-            except ValueError as e:
-                raise PermissionError(f"Access denied: {e}")
+                is_allowed = True
+            except ValueError:
+                pass
+            
+            # Check if in safe system paths whitelist
+            if not is_allowed:
+                for safe_path in safe_system_paths:
+                    if abs_path == safe_path or abs_path.startswith(safe_path + "/"):
+                        is_allowed = True
+                        break
+            
+            if not is_allowed:
+                raise PermissionError(
+                    f"Access denied: file is outside project workspace. "
+                    f"Only files under the project directory ({project_root}) "
+                    f"or safe system paths are accessible."
+                )
             
             if not os.path.exists(abs_path):
                 raise FileNotFoundError(f"File not found: {file_path}")
