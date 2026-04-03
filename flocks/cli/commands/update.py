@@ -92,25 +92,27 @@ async def _update(check: bool, yes: bool, force: bool = False) -> None:
         version_to_apply,
         zipball_url=info.zipball_url,
         tarball_url=info.tarball_url,
+        restart=False,
     ):
         if progress.stage == "error":
             console.print(f"\n[red]✗ 升级失败：{progress.message}[/red]")
             raise typer.Exit(1)
 
-        if progress.stage in ("done",):
+        if progress.stage == "done":
+            step += 1
+            console.print(f"[cyan][{step}/{total_steps}] 完成[/cyan]  ", end="")
+            console.print("[green]✓[/green]")
             continue
 
         if progress.stage not in seen_stages:
             seen_stages.add(progress.stage)
             step += 1
             label = stage_labels.get(progress.stage, progress.stage)
-            if progress.stage == "restarting":
-                console.print(f"[cyan][{step}/{total_steps}] {label}...[/cyan]")
-            else:
-                console.print(f"[cyan][{step}/{total_steps}] {label}...[/cyan]  ", end="")
-                console.print("[green]✓[/green]")
+            console.print(f"[cyan][{step}/{total_steps}] {label}...[/cyan]  ", end="")
+            console.print("[green]✓[/green]")
 
-    console.print("[green]升级完成[/green]")
+    console.print(f"\n[green]✓ 升级完成 → v{version_to_apply}[/green]")
+    console.print("[dim]如有后台服务正在运行，请执行 [bold]flocks restart[/bold] 重启服务[/dim]")
 
 
 def _print_version_table(info) -> None:
