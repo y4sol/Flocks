@@ -518,6 +518,15 @@ class ConfigInfo(BaseModel):
     compaction: Optional[CompactionConfig] = None
     experimental: Optional[ExperimentalConfig] = None
     
+    # Allowed read paths for file tool (security: whitelist of paths outside project workspace)
+    allow_read_paths: Optional[List[str]] = Field(
+        None,
+        description=(
+            "List of extra paths (absolute) that the file read tool is allowed to access "
+            "outside the project workspace. Example: ['/etc/hosts', '/opt/myapp/config']"
+        ),
+    )
+    
     # Memory system configuration (added for memory system integration)
     memory: Optional[Any] = Field(
         None,
