@@ -30,7 +30,7 @@ async def list_files(path: str = Query(..., description="Directory path")):
         nodes = await File.list(safe_path)
         return nodes
     except PermissionError:
-        log.warning("http_file.list.denied")
+        log.warning("http_file.list.denied", {"path": path})
         raise HTTPException(status_code=403, detail="Access denied")
     except Exception as e:
         log.error("file.list.error", {"error": str(e), "path": path})
@@ -52,7 +52,7 @@ async def read_file(path: str = Query(..., description="File path")):
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except PermissionError:
-        log.warning("http_file.read.denied")
+        log.warning("http_file.read.denied", {"path": path})
         raise HTTPException(status_code=403, detail="Access denied")
     except Exception as e:
         log.error("file.read.error", {"error": str(e), "path": path})
@@ -71,6 +71,9 @@ async def search_files(
     
     Search for files or directories by name or pattern in the project directory.
     """
+    import re
+    if not query or len(query) > 200 or re.search(r'[;\|`$\x00]', query):
+        raise HTTPException(status_code=400, detail="Invalid search query")
     try:
         results = await File.search(query=query, limit=limit, dirs=dirs, type=type)
         return results
@@ -115,17 +118,25 @@ async def find_text(pattern: str = Query(..., description="Search pattern")):
     Find text
     
     Search for text patterns across files in the project using grep.
+    Only searches within the Flocks project root directory.
     """
     try:
         import subprocess
         import os
-        
-        cwd = os.getcwd()
-        
-        # Use grep for text search
+        from flocks.utils.paths import find_flocks_project_root
+
+        project_root = find_flocks_project_root()
+        if project_root is None:
+            raise HTTPException(status_code=403, detail="No Flocks project root found")
+        cwd = str(project_root)
+
+        if not pattern or len(pattern) > 500:
+            raise HTTPException(status_code=400, detail="Invalid search pattern")
+
         cmd = [
             "grep",
             "-rn",  # recursive, line numbers
+            "-F",   # fixed string, prevents regex injection
             "--include=*.py",
             "--include=*.js",
             "--include=*.ts",
@@ -144,6 +155,7 @@ async def find_text(pattern: str = Query(..., description="Search pattern")):
             "--exclude-dir=__pycache__",
             "--exclude-dir=.venv",
             "--exclude-dir=venv",
+            "--",
             pattern,
             ".",
         ]
@@ -159,7 +171,7 @@ async def find_text(pattern: str = Query(..., description="Search pattern")):
         matches = []
         
         if result.returncode == 0:
-            for line in result.stdout.split("\n")[:100]:  # Limit to 100 matches
+            for line in result.stdout.split("\n")[:100]:
                 if not line.strip():
                     continue
                 
@@ -176,6 +188,8 @@ async def find_text(pattern: str = Query(..., description="Search pattern")):
                     })
         
         return matches
+    except HTTPException:
+        raise
     except Exception as e:
         log.error("text.search.error", {"error": str(e), "pattern": pattern})
         raise HTTPException(status_code=500, detail=str(e))

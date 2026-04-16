@@ -278,15 +278,28 @@ log = Log.create(service="server")
 
 
 # CORS Configuration
-def configure_cors() -> None:
-    """Configure CORS middleware"""
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],  # TODO: Make configurable
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+#
+# Default: only localhost origins (any port).  Users can override via
+# ``server.cors`` in flocks.json with exact origin strings
+# (e.g. ``["http://10.0.0.5:5173"]``).
+#
+# We read config synchronously at import time.  Config.get() is async, but
+# at module-load the event loop is not yet running, so ``asyncio.run`` is
+# safe here.  If it fails for any reason we fall back to the safe default.
+
+_LOCALHOST_ORIGIN_RE = r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$"
+
+
+def _read_cors_config() -> tuple[list[str], str | None]:
+    """Return (allow_origins, allow_origin_regex) for CORSMiddleware."""
+    import asyncio
+    try:
+        cfg = asyncio.run(Config.get())
+        if cfg and cfg.server and cfg.server.cors:
+            return cfg.server.cors, None
+    except Exception:
+        pass
+    return [], _LOCALHOST_ORIGIN_RE
 
 
 # Instance Context Middleware
@@ -435,7 +448,15 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 
 # Configure CORS
-configure_cors()
+_cors_origins, _cors_origin_re = _read_cors_config()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_origin_regex=_cors_origin_re,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # Import and include routers

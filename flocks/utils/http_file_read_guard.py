@@ -1,10 +1,11 @@
 """
-Path checks for HTTP ``/api/file/*`` endpoints: blocks arbitrary file read without
-changing :meth:`flocks.utils.file.File.read` used by internal callers.
+Path validation for HTTP ``/api/file/*`` endpoints.
+
+Blocks arbitrary file read without changing :meth:`flocks.utils.file.File.read`
+used by internal callers (agent tools, memory, etc.).
 
 - Used only from ``flocks.server.routes.file``.
 - Reads ``allowReadPaths`` via :meth:`flocks.config.config.Config.get` (Pydantic alias).
-- Uses :func:`flocks.sandbox.paths.assert_sandbox_path` for containment and symlink checks.
 - When no ``.flocks`` project root exists, does not fall back to cwd as a sandbox root.
 """
 
@@ -15,7 +16,6 @@ from pathlib import Path
 from typing import List, Optional, Set
 
 from flocks.config.config import Config, ConfigInfo
-from flocks.sandbox.paths import assert_sandbox_path
 from flocks.utils.paths import find_flocks_project_root
 
 
@@ -36,7 +36,10 @@ _SAFE_SYSTEM_FILES: Set[str] = _safe_system_files_resolved()
 
 
 def _normalize_allow_read_entries(entries: Optional[List[str]]) -> List[str]:
-    """Validate extra readable paths from config: absolute, not FS root, not under config or ``~/.ssh``."""
+    """Validate extra readable paths from config.
+
+    Requirements: absolute, not FS root, not under config dir or ``~/.ssh``.
+    """
     if not entries:
         return []
 
@@ -114,11 +117,36 @@ def _is_filesystem_root(p: Path) -> bool:
     return r.parent == r
 
 
+def _assert_path_contained(file_path: str, root: str) -> str:
+    """Check that *file_path* resolves to somewhere inside *root*.
+
+    Follows symlinks to prevent escape via symlinked directories/files.
+    Raises ``ValueError`` when the resolved path is outside *root*.
+
+    Returns the resolved absolute path.
+    """
+    root_resolved = Path(root).resolve()
+    target_resolved = Path(file_path).resolve()
+
+    if not (target_resolved == root_resolved or target_resolved.is_relative_to(root_resolved)):
+        raise ValueError(
+            f"Path {file_path} resolves to {target_resolved} which is outside {root_resolved}"
+        )
+
+    return str(target_resolved)
+
+
 def _initial_abs_path(user_path: str, project_root: Optional[Path]) -> str:
-    """Turn the query path into an absolute path; relative paths are only allowed under the found project root."""
+    """Turn the query path into an absolute path.
+
+    Relative paths are only allowed when a project root exists and are
+    resolved relative to it.
+    """
     raw = user_path.strip()
     if not raw:
         raise PermissionError("Empty path")
+    if len(raw) > 4096:
+        raise PermissionError("Path too long")
 
     expanded = str(Path(raw).expanduser())
     if os.path.isabs(expanded):
@@ -134,8 +162,9 @@ async def resolve_path_for_http_file_access(
     user_path: str,
     config: ConfigInfo,
 ) -> str:
-    """
-    Resolve and authorize ``user_path``; on success return an absolute path safe to open.
+    """Resolve and authorize ``user_path`` for HTTP file access.
+
+    On success, returns an absolute path safe to open.
 
     Raises:
         PermissionError: Path is not allowed for remote HTTP file access.
@@ -162,7 +191,6 @@ async def resolve_path_for_http_file_access(
         if r not in roots:
             roots.append(r)
 
-    # Deduplicate while preserving order
     seen: Set[str] = set()
     uniq: List[str] = []
     for r in roots:
@@ -172,14 +200,9 @@ async def resolve_path_for_http_file_access(
 
     for root in uniq:
         try:
-            result = await assert_sandbox_path(
-                file_path=abs_guess,
-                cwd=root,
-                root=root,
-            )
-            cand = str(Path(result.resolved).resolve())
-            if not _blocked_for_http_read(cand):
-                return cand
+            resolved = _assert_path_contained(abs_guess, root)
+            if not _blocked_for_http_read(resolved):
+                return resolved
         except ValueError:
             continue
 
